@@ -234,6 +234,24 @@ API2CONFIG = {
 }
 
 
+def parse_verdict(judge_output):
+    """Extract the judge's final verdict, or None when there is no parseable one.
+
+    Substring-matching the whole output scored REQUIREMENTS_NOT_MET verdicts as
+    passes whenever the step-by-step analysis mentioned REQUIREMENTS_MET, and a
+    dummy "Generation failed" placeholder as a clean fail. The verdict is the
+    last occurrence of either token; the pass token is not a substring of the
+    fail token, so position comparison is unambiguous.
+    """
+    met = judge_output.rfind('REQUIREMENTS_MET')
+    not_met = judge_output.rfind('REQUIREMENTS_NOT_MET')
+    if met == -1 and not_met == -1:
+        return None
+    if met != -1 and (not_met == -1 or met > not_met):
+        return True
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description='Research-Eval evaluation script')
     subparsers = parser.add_subparsers(dest='command', required=True, help='The command to run')
@@ -271,7 +289,7 @@ def main():
         save_jsonl(examples, args.output)
     elif args.command == 'judge':
         examples = read_jsonl(args.input)
-        validator = lambda generation: 'REQUIREMENTS_MET' in generation or 'REQUIREMENTS_NOT_MET' in generation
+        validator = lambda generation: parse_verdict(generation) is not None
         prompts = [format_judge(decrypt(example['prompt']), example['generation'], map(decrypt, example['requirements'])) for example in examples]
         generations = generate_prompts(generate, prompts, args.model, api_key, args.trials, args.concurrency, validator)
         for example, generation in zip(examples, generations):
@@ -283,11 +301,16 @@ def main():
         save_jsonl(examples, args.output)
     elif args.command == 'report':
         examples = read_jsonl(args.input)
-        score = 100 * sum(['REQUIREMENTS_MET' in example['judge_output'] for example in examples]) / len(examples)
+        verdicts = [parse_verdict(example['judge_output']) for example in examples]
+        n_unparseable = sum(verdict is None for verdict in verdicts)
+        score = 100 * sum(verdict is True for verdict in verdicts) / len(examples)
         api = examples[0]['metadata']['generation_api']
         model = examples[0]['metadata']['generation_model']
         api_model = f'{api}/{model}'
-        print(f'{api_model:50s} {score:.1f}')
+        line = f'{api_model:50s} {score:.1f}'
+        if n_unparseable:
+            line += f'   ({n_unparseable}/{len(examples)} judge outputs had no parseable verdict)'
+        print(line)
 
 
 if __name__ == '__main__':
